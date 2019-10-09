@@ -1,13 +1,16 @@
 #include <stdint.h>
+#include <stdio.h>
 #include <Windows.h>
 #include <TlHelp32.h>
 
 // Target process name
-#define PROCESS_NAME "csgo.exe"
+#define PROCESS_NAME L"csgo.exe"
 
 #define ERASE_ENTRY_POINT    TRUE
 #define ERASE_PE_HEADER      TRUE
 #define DECRYPT_DLL          FALSE
+
+#define SUCCESS_MESSAGE      TRUE
 
 // Your DLL as a byte array
 static
@@ -221,37 +224,40 @@ DWORD WINAPI loadLibrary(LoaderData* loaderData)
 
 VOID stub(VOID) { }
 
-INT main(INT argc, PCSTR* argv)
+INT WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, INT nShowCmd)
 {
     HANDLE processSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (processSnapshot == INVALID_HANDLE_VALUE)
         return 1;
 
     HANDLE process = NULL;
-    PROCESSENTRY32 processInfo = { sizeof(processInfo) };
+    PROCESSENTRY32W processInfo;
+    processInfo.dwSize = sizeof(processInfo);
 
-    if (Process32First(processSnapshot, &processInfo)) {
+    if (Process32FirstW(processSnapshot, &processInfo)) {
         do {
-            if (!strcmp(processInfo.szExeFile, PROCESS_NAME)) {
-                CloseHandle(processSnapshot);
+            if (!lstrcmpW(processInfo.szExeFile, PROCESS_NAME)) {
                 process = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD, FALSE, processInfo.th32ProcessID);
+                break;
             }
-        } while (Process32Next(processSnapshot, &processInfo));
+        } while (Process32NextW(processSnapshot, &processInfo));
     }
-    if (!process) {
-        CloseHandle(processSnapshot);
+    CloseHandle(processSnapshot);
+
+    if (!process)
         return 1;
-    }
 
 #if DECRYPT_DLL
-    if (argc < 2)
-        return 1;
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-key")) {
+    INT argc;
+    PCWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+
+    for (INT i = 1; i < argc; i++) {
+        if (!lstrcmpW(argv[i], L"-key")) {
             decryptBinary(argv[++i]);
             break;
         }
     }
+    LocalFree(argv);
 #endif
 
     PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)(binary + ((PIMAGE_DOS_HEADER)binary)->e_lfanew);
@@ -270,7 +276,11 @@ INT main(INT argc, PCSTR* argv)
     LoaderData* loaderMemory = VirtualAllocEx(process, NULL, 4096, MEM_COMMIT | MEM_RESERVE,
         PAGE_EXECUTE_READ);
 
-    LoaderData loaderParams = { executableImage, LoadLibraryA, GetProcAddress, (VOID(WINAPI*)(PVOID, SIZE_T))GetProcAddress(GetModuleHandleW(L"ntdll"), "RtlZeroMemory") };
+    LoaderData loaderParams;
+    loaderParams.imageBase = executableImage;
+    loaderParams.loadLibraryA = LoadLibraryA;
+    loaderParams.getProcAddress = GetProcAddress;
+    loaderParams.rtlZeroMemory = (VOID(NTAPI*)(PVOID, SIZE_T))GetProcAddress(LoadLibraryW(L"ntdll"), "RtlZeroMemory");
 
     WriteProcessMemory(process, loaderMemory, &loaderParams, sizeof(LoaderData),
         NULL);
@@ -279,4 +289,11 @@ INT main(INT argc, PCSTR* argv)
     WaitForSingleObject(CreateRemoteThread(process, NULL, 0, (LPTHREAD_START_ROUTINE)(loaderMemory + 1),
         loaderMemory, 0, NULL), INFINITE);
     VirtualFreeEx(process, loaderMemory, 0, MEM_RELEASE);
+
+#if SUCCESS_MESSAGE
+    CHAR buf[100];
+    sprintf_s(buf, sizeof(buf), "Dll successfully loaded into %ws at 0x%x", PROCESS_NAME, (DWORD)executableImage);
+    MessageBoxA(NULL, buf, "Success", MB_OK | MB_ICONINFORMATION);
+#endif
+    return TRUE;
 }
